@@ -1,0 +1,8 @@
+admin_key.env
+key.env
+Conversation history/
+*.env
+__pycache__/
+*.pyc
+*.log
+.DS_Store
