@@ -39,8 +39,9 @@ file_lock = threading.Lock()
 # Zmienna przechowująca aktualny plik konwersacji (pełna ścieżka) lub None
 current_conv_file = None
 
-# Licznik tagów linków
+# Licznik tagów linków i bloków kodu
 link_tag_counter = 0
+copy_button_counter = 0
 
 # Tworzenie okna aplikacji
 root = tk.Tk()
@@ -48,13 +49,19 @@ root.title("ChatGPT - Tkinter")
 root.geometry("1200x800")
 root.configure(bg="#1e1e1e")
 
+# Styl zaznaczenia globalnie
+root.option_add("*Text.selectBackground", "#4b6eaf")
+root.option_add("*Text.selectForeground", "#ffffff")
+root.option_add("*Text.inactiveselectbackground", "#4b6eaf")
+
 # Dostępne modele
 available_models = [
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.4", "gpt-5.4-mini", "gpt-5.2", "gpt-5.1", "gpt-5",
     "gpt-5-mini", "gpt-5-nano", "gpt-3.5-turbo", "gpt-4.1",
     "gpt-4o-mini", "gpt-4o", "gpt-4.5-preview"
 ]
-selected_model = tk.StringVar(value=available_models[1])
+selected_model = tk.StringVar(value=available_models[2])
 
 # === Górny pasek wyboru modelu ===
 model_frame = tk.Frame(root, bg="#1e1e1e")
@@ -111,12 +118,28 @@ chat_history = scrolledtext.ScrolledText(
     state='disabled',
     bg="#252526",
     fg="white",
-    font=("Arial", 12)
+    font=("Arial", 12),
+    insertbackground="white",
+    selectbackground="#4b6eaf",
+    selectforeground="#ffffff",
+    inactiveselectbackground="#4b6eaf",
+    relief=tk.FLAT,
+    padx=10,
+    pady=10
 )
 chat_history.grid(row=0, column=1, padx=10, pady=(10, 5), sticky="nsew")
 
 # Pole wpisywania
-entry = scrolledtext.ScrolledText(main_frame, height=4, bg="#333333", fg="white", font=("Arial", 12), wrap=tk.WORD)
+entry = scrolledtext.ScrolledText(
+    main_frame,
+    height=4,
+    bg="#333333",
+    fg="white",
+    font=("Arial", 12),
+    wrap=tk.WORD,
+    insertbackground="white",
+    relief=tk.FLAT
+)
 entry.grid(row=1, column=1, padx=10, pady=5, sticky="nsew")
 
 # RAMKA Z INFORMACJAMI O ZUŻYCIU
@@ -199,15 +222,15 @@ def load_conversation_from_file(path):
 
 def open_link(url):
     try:
-        webbrowser.open(url)
+        webbrowser.open_new_tab(url)
     except Exception as e:
         print("Błąd otwierania linku:", e)
 
 def add_link(widget, text, url):
     global link_tag_counter
-    start_index = widget.index(END)
-    widget.insert(END, text)
-    end_index = widget.index(END)
+    start_index = widget.index("insert")
+    widget.insert("insert", text)
+    end_index = widget.index("insert")
 
     tag_name = f"link_{link_tag_counter}"
     link_tag_counter += 1
@@ -219,42 +242,64 @@ def add_link(widget, text, url):
     widget.tag_bind(tag_name, "<Leave>", lambda e: widget.config(cursor="xterm"))
 
 def parse_inline_segments(text):
-    """
-    Zwraca listę segmentów:
-    ("text", ...)
-    ("bold", ...)
-    ("italic", ...)
-    ("code", ...)
-    ("link", visible_text, url)
-
-    Obsługuje:
-    - [tekst](url)
-    - **bold**
-    - *italic*
-    - `code`
-    - surowe URL-e
-    """
-    pattern = r'(\[.*?\]\(https?://[^\s)]+(?:\)[^\s)]*)?\)|https?://[^\s]+|\*\*.*?\*\*|`.*?`|\*.*?\*)'
-    parts = re.split(pattern, text)
-
     segments = []
-    for part in parts:
-        if not part:
+    i = 0
+    length = len(text)
+
+    while i < length:
+        # markdown link [tekst](url)
+        if text[i] == "[":
+            match = re.match(r'\[([^\]]+)\]\((https?://[^\s)]+(?:\([^\s)]+\)[^\s)]*)*)\)', text[i:])
+            if match:
+                visible = match.group(1)
+                url = match.group(2)
+                segments.append(("link", visible, url))
+                i += match.end()
+                continue
+
+        # inline code
+        if text[i] == "`":
+            end = text.find("`", i + 1)
+            if end != -1:
+                segments.append(("code", text[i + 1:end]))
+                i = end + 1
+                continue
+
+        # bold
+        if text[i:i+2] == "**":
+            end = text.find("**", i + 2)
+            if end != -1:
+                segments.append(("bold", text[i + 2:end]))
+                i = end + 2
+                continue
+
+        # italic
+        if text[i] == "*":
+            end = text.find("*", i + 1)
+            if end != -1:
+                segments.append(("italic", text[i + 1:end]))
+                i = end + 1
+                continue
+
+        # raw url
+        url_match = re.match(r'https?://[^\s<>"\]]+', text[i:])
+        if url_match:
+            raw_url = url_match.group(0)
+            raw_url = raw_url.rstrip('.,;:!?)]}')
+            segments.append(("link", raw_url, raw_url))
+            i += len(url_match.group(0))
             continue
 
-        md_link = re.match(r'^\[(.*?)\]\((https?://[^\s]+)\)$', part)
-        if md_link:
-            segments.append(("link", md_link.group(1), md_link.group(2)))
-        elif re.match(r'^https?://[^\s]+$', part):
-            segments.append(("link", part, part))
-        elif part.startswith("**") and part.endswith("**") and len(part) >= 4:
-            segments.append(("bold", part[2:-2]))
-        elif part.startswith("*") and part.endswith("*") and len(part) >= 2:
-            segments.append(("italic", part[1:-1]))
-        elif part.startswith("`") and part.endswith("`") and len(part) >= 2:
-            segments.append(("code", part[1:-1]))
-        else:
-            segments.append(("text", part))
+        # zwykły tekst - zbieraj do najbliższego znacznika
+        next_positions = []
+        for marker in ["[", "`", "*", "http://", "https://"]:
+            pos = text.find(marker, i + 1)
+            if pos != -1:
+                next_positions.append(pos)
+
+        next_i = min(next_positions) if next_positions else length
+        segments.append(("text", text[i:next_i]))
+        i = next_i
 
     return segments
 
@@ -263,13 +308,13 @@ def insert_inline_segments(widget, text):
         seg_type = seg[0]
 
         if seg_type == "text":
-            widget.insert(END, seg[1])
+            widget.insert("insert", seg[1])
         elif seg_type == "bold":
-            widget.insert(END, seg[1], "md_bold")
+            widget.insert("insert", seg[1], "md_bold")
         elif seg_type == "italic":
-            widget.insert(END, seg[1], "md_italic")
+            widget.insert("insert", seg[1], "md_italic")
         elif seg_type == "code":
-            widget.insert(END, seg[1], "md_code")
+            widget.insert("insert", seg[1], "md_code")
         elif seg_type == "link":
             add_link(widget, seg[1], seg[2])
 
@@ -287,10 +332,6 @@ def is_table_line(line):
     return "|" in stripped and len(stripped.strip("|").split("|")) >= 2
 
 def parse_table(lines, start_index):
-    """
-    Próbuje sparsować markdownową tabelę od start_index.
-    Zwraca (table_lines_count, rendered_table_text) albo (0, None)
-    """
     if start_index + 1 >= len(lines):
         return 0, None
 
@@ -330,21 +371,61 @@ def parse_table(lines, start_index):
     for r in parsed_rows[1:]:
         rendered += " | ".join(cell.ljust(col_widths[i]) for i, cell in enumerate(r)) + "\n"
 
-    return len(table_rows) + 1, rendered  # +1 dla separatora
+    return len(table_rows) + 1, rendered
+
+def copy_to_clipboard(text):
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+    except Exception as e:
+        print("Błąd kopiowania do schowka:", e)
+
+def insert_codeblock_with_button(widget, code_text):
+    global copy_button_counter
+
+    widget.insert("insert", "\n")
+
+    btn = tk.Button(
+        widget,
+        text="Kopiuj kod",
+        font=("Arial", 9, "bold"),
+        bg="#3a3d41",
+        fg="white",
+        activebackground="#4a4d52",
+        activeforeground="white",
+        relief=tk.FLAT,
+        padx=8,
+        pady=2,
+        command=lambda t=code_text: copy_to_clipboard(t)
+    )
+
+    widget.window_create("insert", window=btn)
+    widget.insert("insert", "\n")
+
+    start_index = widget.index("insert")
+    widget.insert("insert", code_text.rstrip() + "\n")
+    end_index = widget.index("insert")
+    widget.tag_add(f"codeblock_{copy_button_counter}", start_index, end_index)
+    widget.tag_configure(
+        f"codeblock_{copy_button_counter}",
+        font=("Consolas", 11),
+        background="#2D2F31",
+        foreground="#ffffff",
+        lmargin1=20,
+        lmargin2=20,
+        rmargin=20,
+        spacing1=4,
+        spacing3=8
+    )
+
+    copy_button_counter += 1
+    widget.insert("insert", "\n")
 
 def insert_markdown(widget, content):
-    """
-    Obsługuje:
-    - # ## ###
-    - **bold**, *italic*, `code`
-    - listy: -, *, 1., a., a)
-    - cytaty >
-    - linki [tekst](url) i surowe URL
-    - bloki kodu ```
-    - tabele markdown
-    """
     lines = content.splitlines()
     in_code_block = False
+    code_block_lines = []
     i = 0
 
     while i < len(lines):
@@ -353,86 +434,103 @@ def insert_markdown(widget, content):
 
         # start/stop bloku kodu
         if stripped.startswith("```"):
-            in_code_block = not in_code_block
             if not in_code_block:
-                widget.insert(END, "\n")
+                in_code_block = True
+                code_block_lines = []
+            else:
+                in_code_block = False
+                code_text = "\n".join(code_block_lines)
+                insert_codeblock_with_button(widget, code_text)
+                code_block_lines = []
             i += 1
             continue
 
         if in_code_block:
-            widget.insert(END, line + "\n", "md_codeblock")
+            code_block_lines.append(line)
             i += 1
             continue
 
         # tabela
         consumed, rendered_table = parse_table(lines, i)
         if consumed > 0 and rendered_table:
-            widget.insert(END, rendered_table, "md_table")
-            widget.insert(END, "\n")
+            widget.insert("insert", rendered_table, "md_table")
+            widget.insert("insert", "\n")
             i += consumed
             continue
 
         # nagłówki
         if stripped.startswith("### "):
-            widget.insert(END, stripped[4:] + "\n", "md_h3")
+            widget.insert("insert", stripped[4:] + "\n", "md_h3")
             i += 1
             continue
         elif stripped.startswith("## "):
-            widget.insert(END, stripped[3:] + "\n", "md_h2")
+            widget.insert("insert", stripped[3:] + "\n", "md_h2")
             i += 1
             continue
         elif stripped.startswith("# "):
-            widget.insert(END, stripped[2:] + "\n", "md_h1")
+            widget.insert("insert", stripped[2:] + "\n", "md_h1")
             i += 1
             continue
 
         # cytaty
         if stripped.startswith(">"):
             quote_text = re.sub(r"^>\s?", "", stripped)
-            widget.insert(END, "▌ ", "md_quote_bar")
+            widget.insert("insert", "▌ ", "md_quote_bar")
             insert_inline_segments(widget, quote_text)
-            widget.insert(END, "\n", "md_quote")
+            widget.insert("insert", "\n", "md_quote")
             i += 1
             continue
 
         # listy punktowane
         if stripped.startswith("- ") or stripped.startswith("* "):
-            widget.insert(END, "• ", "md_bullet")
+            widget.insert("insert", "• ", "md_bullet")
             insert_inline_segments(widget, stripped[2:])
-            widget.insert(END, "\n", "md_bullet")
+            widget.insert("insert", "\n", "md_bullet")
             i += 1
             continue
 
         # lista numerowana
         num_match = re.match(r"^(\d+\.)\s+(.*)", stripped)
         if num_match:
-            widget.insert(END, num_match.group(1) + " ", "md_number")
+            widget.insert("insert", num_match.group(1) + " ", "md_number")
             insert_inline_segments(widget, num_match.group(2))
-            widget.insert(END, "\n", "md_number")
+            widget.insert("insert", "\n", "md_number")
             i += 1
             continue
 
-        # podpunkty literowe: a. xxx / a) xxx / A. xxx / A) xxx
+        # podpunkty literowe
         alpha_match = re.match(r"^([A-Za-z][\.\)])\s+(.*)", stripped)
         if alpha_match:
-            widget.insert(END, alpha_match.group(1) + " ", "md_alpha")
+            widget.insert("insert", alpha_match.group(1) + " ", "md_alpha")
             insert_inline_segments(widget, alpha_match.group(2))
-            widget.insert(END, "\n", "md_alpha")
+            widget.insert("insert", "\n", "md_alpha")
             i += 1
             continue
 
         # pusta linia
         if stripped == "":
-            widget.insert(END, "\n")
+            widget.insert("insert", "\n")
             i += 1
             continue
 
         # zwykły tekst
         insert_inline_segments(widget, line)
-        widget.insert(END, "\n")
+        widget.insert("insert", "\n")
         i += 1
 
+def insert_user_bubble(widget, content):
+    widget.insert("insert", "\n")
+    widget.insert("insert", "Ty\n", ("user_name", "user_bubble"))
+    start_index = widget.index("insert")
+    widget.insert("insert", content + "\n")
+    end_index = widget.index("insert")
+    widget.tag_add("user_bubble", start_index + " linestart", end_index)
+    widget.insert("insert", "\n")
+
 def refresh_chat_widget():
+    global copy_button_counter
+    copy_button_counter = 0
+
     chat_history.config(state='normal')
     chat_history.delete("1.0", tk.END)
 
@@ -444,16 +542,15 @@ def refresh_chat_widget():
             continue
 
         if role == "user":
-            chat_history.insert(END, "Ty:\n", ("user_tag", "align_right"))
-            chat_history.insert(END, content + "\n\n", "align_right")
+            insert_user_bubble(chat_history, content)
 
         elif role == "assistant":
-            chat_history.insert(END, "ChatGPT:\n", "bot_tag")
+            chat_history.insert("insert", "ChatGPT:\n", "bot_tag")
             insert_markdown(chat_history, content)
-            chat_history.insert(END, "\n")
+            chat_history.insert("insert", "\n")
 
         else:
-            chat_history.insert(END, f"{role}: {content}\n")
+            chat_history.insert("insert", f"{role}: {content}\n")
 
     chat_history.config(state='disabled')
     chat_history.yview(END)
@@ -514,9 +611,7 @@ def send_message():
 
     # tymczasowe wyświetlenie usera
     chat_history.config(state='normal')
-    chat_history.insert(END, "\n")
-    chat_history.insert(END, "Ty:\n", ("user_tag", "align_right"))
-    chat_history.insert(END, user_message + "\n", "align_right")
+    insert_user_bubble(chat_history, user_message)
     chat_history.config(state='disabled')
     chat_history.yview(END)
 
@@ -581,72 +676,18 @@ def send_message():
             model = selected_model.get()
             print(f"[DEBUG] Używany model: {model}")
 
-            stream_enabled = True
-            print(f"[DEBUG] stream_enabled = {stream_enabled}")
-
-            def init_bot_line():
-                if conv_path_for_thread != current_conv_file:
-                    return
-                chat_history.config(state='normal')
-                chat_history.insert(END, "ChatGPT:\n", "bot_tag")
-                chat_history.config(state='disabled')
-                chat_history.yview(END)
-            root.after(0, init_bot_line)
-
             response = openai_client.chat.completions.create(
                 model=model,
                 messages=messages_for_api,
-                stream=stream_enabled
+                stream=False
             )
             print("[DEBUG] API response created")
 
-            full_reply = ""
-
-            if stream_enabled:
-                def append_token_to_ui(token_chunk):
-                    try:
-                        if conv_path_for_thread != current_conv_file:
-                            return
-                        chat_history.config(state='normal')
-                        chat_history.insert(END, token_chunk)
-                        chat_history.config(state='disabled')
-                        if is_at_bottom(chat_history):
-                            chat_history.yview(END)
-                    except Exception as e:
-                        print("[DEBUG] Błąd w append_token_to_ui:", e)
-
-                try:
-                    for chunk in response:
-                        token = ""
-                        try:
-                            token = chunk.choices[0].delta.content or ""
-                        except Exception as e_inner:
-                            print("[DEBUG] Błąd pobierania tokenu ze strumienia:", e_inner)
-                            token = ""
-                        if token:
-                            full_reply += token
-                            root.after(0, append_token_to_ui, token)
-                except Exception as e_stream:
-                    print("[DEBUG] Błąd w pętli stream:", e_stream)
-
-            else:
-                try:
-                    full_reply = response.choices[0].message.content or ""
-                except Exception as e_nostream:
-                    print("[DEBUG] Błąd odczytu odpowiedzi w trybie bez streamu:", e_nostream)
-                    full_reply = ""
-
-                def append_full_reply():
-                    try:
-                        if conv_path_for_thread != current_conv_file:
-                            return
-                        chat_history.config(state='normal')
-                        chat_history.insert(END, full_reply)
-                        chat_history.config(state='disabled')
-                        chat_history.yview(END)
-                    except Exception as e:
-                        print("[DEBUG] Błąd w append_full_reply:", e)
-                root.after(0, append_full_reply)
+            try:
+                full_reply = response.choices[0].message.content or ""
+            except Exception as e_nostream:
+                print("[DEBUG] Błąd odczytu odpowiedzi:", e_nostream)
+                full_reply = ""
 
             print("[DEBUG] Pełna odpowiedź długość:", len(full_reply))
 
@@ -727,25 +768,37 @@ entry.bind('<KeyPress-Return>', on_entry_key)
 
 # ===== TAGI =====
 
-chat_history.tag_configure("user_tag", foreground="lightgreen", font=("Arial", 12, "bold"))
-chat_history.tag_configure("bot_tag", foreground="violet", font=("Arial", 12, "bold"))
+chat_history.tag_configure("user_name", foreground="#d6ecff", font=("Arial", 10, "bold"))
+chat_history.tag_configure(
+    "user_bubble",
+    background="#dbeeff",
+    foreground="#0f1f2e",
+    font=("Arial", 12),
+    justify="right",
+    lmargin1=280,
+    lmargin2=280,
+    rmargin=20,
+    spacing1=4,
+    spacing3=4
+)
 
-chat_history.tag_configure("md_h1", font=("Arial", 18, "bold"), foreground="#dcdcdc")
-chat_history.tag_configure("md_h2", font=("Arial", 16, "bold"), foreground="#dcdcdc")
-chat_history.tag_configure("md_h3", font=("Arial", 14, "bold"), foreground="#dcdcdc")
+chat_history.tag_configure("bot_tag", foreground="#c586ff", font=("Arial", 12, "bold"))
+
+chat_history.tag_configure("md_h1", font=("Arial", 18, "bold"), foreground="#dcdcdc", spacing1=8, spacing3=6)
+chat_history.tag_configure("md_h2", font=("Arial", 16, "bold"), foreground="#dcdcdc", spacing1=6, spacing3=4)
+chat_history.tag_configure("md_h3", font=("Arial", 14, "bold"), foreground="#dcdcdc", spacing1=4, spacing3=3)
 chat_history.tag_configure("md_bold", font=("Arial", 12, "bold"))
 chat_history.tag_configure("md_italic", font=("Arial", 12, "italic"))
 chat_history.tag_configure("md_code", font=("Consolas", 11), background="#2d2d2d", foreground="#ffd700")
-chat_history.tag_configure("md_codeblock", font=("Consolas", 11), background="#2D2F31", foreground="#ffffff")
 chat_history.tag_configure("md_bullet", lmargin1=25, lmargin2=45)
 chat_history.tag_configure("md_number", lmargin1=25, lmargin2=45)
 chat_history.tag_configure("md_alpha", lmargin1=45, lmargin2=65)
 chat_history.tag_configure("md_quote", foreground="#b8b8b8", lmargin1=25, lmargin2=45, spacing1=2, spacing3=2)
 chat_history.tag_configure("md_quote_bar", foreground="#7f848e", font=("Arial", 12, "bold"))
-chat_history.tag_configure("md_table", font=("Consolas", 11), foreground="#dcdcdc", background="#2D2F31")
+chat_history.tag_configure("md_table", font=("Consolas", 11), foreground="#dcdcdc", background="#2D2F31", lmargin1=20, lmargin2=20, spacing1=4, spacing3=6)
 
-# wyrównanie użytkownika do prawej
-chat_history.tag_configure("align_right", justify="right", rmargin=20, lmargin1=120, lmargin2=120)
+# Widoczne zaznaczenie także dla kodu
+chat_history.tag_configure("sel", background="#4b6eaf", foreground="#ffffff")
 
 # Obsługa wyboru konwersacji
 def on_conv_select(evt):
